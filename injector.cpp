@@ -15,31 +15,81 @@ static DWORD FindPid(const wchar_t* name) {
     return pid;
 }
 
-static const char* MachineOf(const wchar_t* path) {
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return "neexistuje";
-
-    IMAGE_DOS_HEADER dos{};
-    DWORD got = 0;
-    if (!ReadFile(f, &dos, sizeof(dos), &got, nullptr) || dos.e_magic != IMAGE_DOS_SIGNATURE) {
-        CloseHandle(f); return "neni PE";
-    }
-    SetFilePointer(f, dos.e_lfanew, nullptr, FILE_BEGIN);
-
-    DWORD sig = 0;
-    if (!ReadFile(f, &sig, sizeof(sig), &got, nullptr) || sig != IMAGE_NT_SIGNATURE) {
-        CloseHandle(f); return "neni PE";
-    }
-    IMAGE_FILE_HEADER fh{};
-    if (!ReadFile(f, &fh, sizeof(fh), &got, nullptr)) { CloseHandle(f); return "chyba cteni"; }
-    CloseHandle(f);
-
-    if (fh.Machine == IMAGE_FILE_MACHINE_AMD64) return "x64";
-    if (fh.Machine == IMAGE_FILE_MACHINE_I386) return "x86";
-    return "jina arch";
+static bool ModulePresent(DWORD pid, const wchar_t* name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    MODULEENTRY32W me{}; me.dwSize = sizeof(me);
+    bool found = false;
+    if (Module32FirstW(snap, &me)) do {
+        if (!_wcsicmp(me.szModule, name)) { found = true; break; }
+    } while (Module32NextW(snap, &me));
+    CloseHandle(snap);
+    return found;
 }
 
-int main() {
+static bool Inject(HANDLE proc, DWORD pid, const wchar_t* dll) {
+    if (ModulePresent(pid, L"Cs2Esp.dll")) {
+        printf("modul uz v procesu je, neinjektuji znovu\n");
+        return true;
+    }
+
+    const SIZE_T bytes = (wcslen(dll) + 1) * sizeof(wchar_t);
+
+    void* remote = VirtualAllocEx(proc, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote) { printf("VirtualAllocEx: %lu\n", GetLastError()); return false; }
+
+    if (!WriteProcessMemory(proc, remote, dll, bytes, nullptr)) {
+        printf("WriteProcessMemory: %lu\n", GetLastError());
+        VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+        return false;
+    }
+
+    wchar_t back[MAX_PATH]{};
+    SIZE_T read = 0;
+    ReadProcessMemory(proc, remote, back, bytes, &read);
+    printf("zapsano: %ls\n", back);
+    if (wcsicmp(back, dll) != 0) { printf("cesta nesedi\n"); return false; }
+
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    auto load = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(kernel, "LoadLibraryW"));
+    HANDLE t = CreateRemoteThread(proc, nullptr, 0, load, remote, 0, nullptr);
+    if (!t) { printf("CreateRemoteThread: %lu\n", GetLastError()); return false; }
+
+    WaitForSingleObject(t, 15000);
+    DWORD code = 0;
+    GetExitCodeThread(t, &code);
+    CloseHandle(t);
+    printf("exit kod vlakna: %lu\n", code);
+
+    bool present = ModulePresent(pid, L"Cs2Esp.dll");
+    printf("modul v procesu: %s\n", present ? "ANO" : "NE");
+    if (!present) printf("kdyz je NE, mrkni do konzole CS2 na 'File verification failure'\n");
+    return present;
+}
+
+static bool Eject(HANDLE proc, DWORD pid) {
+    HMODULE remote = nullptr;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W me{}; me.dwSize = sizeof(me);
+        if (Module32FirstW(snap, &me)) do {
+            if (!_wcsicmp(me.szModule, L"Cs2Esp.dll")) { remote = me.hModule; break; }
+        } while (Module32NextW(snap, &me));
+        CloseHandle(snap);
+    }
+    if (!remote) { printf("modul v procesu neni\n"); return false; }
+
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    auto freeLib = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(kernel, "FreeLibrary"));
+    HANDLE t = CreateRemoteThread(proc, nullptr, 0, freeLib, remote, 0, nullptr);
+    if (!t) { printf("CreateRemoteThread: %lu\n", GetLastError()); return false; }
+    WaitForSingleObject(t, 5000);
+    CloseHandle(t);
+    printf("odinjektovano\n");
+    return true;
+}
+
+int main(int argc, char** argv) {
     SetConsoleTitleW(L"Cs2Esp injector");
 
     wchar_t exe[MAX_PATH]{};
@@ -47,78 +97,54 @@ int main() {
     wchar_t* slash = wcsrchr(exe, L'\\');
     if (slash) *slash = 0;
 
+    bool test = argc > 1 && !_stricmp(argv[1], "test");
+    bool eject = argc > 1 && !_stricmp(argv[1], "eject");
+
     wchar_t dll[MAX_PATH]{};
-    swprintf_s(dll, L"%s\\Cs2Esp.dll", exe);
+    if (argc > 2 && argv[2][0])
+        MultiByteToWideChar(CP_ACP, 0, argv[2], -1, dll, MAX_PATH);
+    else
+        swprintf_s(dll, L"%s\\Cs2Esp.dll", exe);
 
-    printf("injector arch: %s\n", sizeof(void*) == 8 ? "x64" : "x86");
     printf("DLL: %ls\n", dll);
-
     if (GetFileAttributesW(dll) == INVALID_FILE_ATTRIBUTES) {
-        printf("\nCHYBA: Cs2Esp.dll neni vedle injectoru.\n");
+        printf("\nCHYBA: DLL nenalezena.\n");
+        printf("Zkopiruj Cs2Esp.dll do slozky hry a spust:\n");
+        printf("  Injector.exe inject \"C:\\...\\game\\csgo\\bin\\win64\\Cs2Esp.dll\"\n");
         system("pause");
         return 1;
     }
 
-    const char* arch = MachineOf(dll);
-    printf("DLL arch: %s\n", arch);
-    if (sizeof(void*) == 8 && strcmp(arch, "x64") != 0) {
-        printf("\nCHYBA: DLL neni x64 - prebuilduj s -A x64.\n");
+    if (test) {
+        printf("\n--- test proti notepad.exe ---\n");
+        STARTUPINFOW si{ sizeof(si) };
+        PROCESS_INFORMATION pi{};
+        wchar_t cmd[] = L"notepad.exe";
+        if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+            printf("CreateProcess selhal\n"); system("pause"); return 2;
+        }
+        Sleep(1500);
+        bool ok = Inject(pi.hProcess, pi.dwProcessId, dll);
+        printf(ok ? "\nV NOTEPADU SE NACETLA\n" : "\nV NOTEPADU SE TAKY NENACETLA\n");
+        TerminateProcess(pi.hProcess, 0);
         system("pause");
-        return 2;
+        return 0;
     }
-
-    SetLastError(0);
-    HMODULE test = LoadLibraryW(dll);
-    if (!test) {
-        DWORD err = GetLastError();
-        char* msg = nullptr;
-        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            nullptr, err, 0, reinterpret_cast<char*>(&msg), 0, nullptr);
-        printf("\nCHYBA: DLL nelze nacist, kod %lu\n", err);
-        if (msg) { printf("%s", msg); LocalFree(msg); }
-        if (err == 126) printf("\nChybi zavislost (VC++ runtime nebo DLL z DrateCoreD).\n");
-        if (err == 193) printf("\nSpatna architektura - prebuilduj -A x64.\n");
-        system("pause");
-        return 3;
-    }
-    FreeLibrary(test);
-    printf("lokalni test zavislosti: OK\n");
 
     DWORD pid = FindPid(L"cs2.exe");
-    if (!pid) { printf("\nCHYBA: cs2.exe nebezi.\n"); system("pause"); return 4; }
-    printf("cs2.exe pid: %lu\n", pid);
+    if (!pid) { printf("cs2.exe nebezi\n"); system("pause"); return 3; }
+    printf("pid %lu\n", pid);
 
     HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!proc) {
-        printf("\nOpenProcess selhal: %lu\n", GetLastError());
+        printf("OpenProcess: %lu\n", GetLastError());
         proc = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD |
-            PROCESS_QUERY_INFORMATION, FALSE, pid);
-        if (!proc) { printf("Spust jako spravce.\n"); system("pause"); return 5; }
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (!proc) { printf("spust jako spravce\n"); system("pause"); return 4; }
     }
 
-    const SIZE_T bytes = (wcslen(dll) + 1) * sizeof(wchar_t);
-    void* remote = VirtualAllocEx(proc, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remote) { printf("VirtualAllocEx: %lu\n", GetLastError()); system("pause"); return 6; }
-    WriteProcessMemory(proc, remote, dll, bytes, nullptr);
-
-    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    auto load = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(kernel, "LoadLibraryW"));
-    HANDLE thread = CreateRemoteThread(proc, nullptr, 0, load, remote, 0, nullptr);
-    if (!thread) { printf("CreateRemoteThread: %lu\n", GetLastError()); system("pause"); return 7; }
-
-    WaitForSingleObject(thread, 10000);
-    DWORD code = 0;
-    GetExitCodeThread(thread, &code);
-    CloseHandle(thread);
-
-    wchar_t log[MAX_PATH]{};
-    swprintf_s(log, L"%s\\cs2esp.log", exe);
-
-    printf("\nLoadLibrary vysledek: %lu\n", code);
-    printf("log existuje: %s\n", GetFileAttributesW(log) != INVALID_FILE_ATTRIBUTES ? "ANO" : "NE");
-
-    if (code == 0) printf("\nDLL se v cilovem procesu nenacetla.\n");
-    else printf("\nDLL nactena, hledej menu na Insert.\n");
+    bool ok = eject ? Eject(proc, pid) : Inject(proc, pid, dll);
+    if (!eject) printf(ok ? "\nOK, zkus Insert\n" : "\nselhalo\n");
 
     CloseHandle(proc);
     system("pause");

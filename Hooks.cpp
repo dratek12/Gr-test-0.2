@@ -1,179 +1,211 @@
-#include "Hooks.h"
+#include <windows.h>
+#include <d3d11.h>
+#include <dxgi.h>
+#include <dxgi1_4.h>
+#include <thread>
+#include <atomic>
+#include <cstdio>
+
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx11.h"
+
+#include "Input.hpp"
 #include "Global.h"
 #include "ESP.h"
 #include "LegitBot.h"
 #include "Misc.h"
-#include "Config.h"
 
-extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 
-static void RebuildRtv(IDXGISwapChain* sc) {
-    G::Rtv.Reset();
-    if (!G::Device) return;
-    ComPtr<ID3D11Texture2D> back;
-    if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&back))))
-        G::Device->CreateRenderTargetView(back.Get(), nullptr, &G::Rtv);
-}
+typedef HRESULT(WINAPI* Present_t)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT(WINAPI* Present1_t)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+typedef HRESULT(WINAPI* ResizeBuffers_t)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+typedef HRESULT(WINAPI* ResizeBuffers1_t)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, const IUnknown* const*);
 
-static void Unload() {
-    G::Unload = false;
-    G::Ready = false;
-    ImGui_ImplDX11_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
-    if (G::OrigWndProc && G::Window)
-        SetWindowLongPtrW(G::Window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(G::OrigWndProc));
-    while (ShowCursor(TRUE) < 0) {}
-    G::Log("unload");
-    G::CloseLog();
-    FreeLibraryAndExitThread(G::Module, 0);
-}
+static Present_t        oPresent = nullptr;
+static Present1_t       oPresent1 = nullptr;
+static ResizeBuffers_t  oResizeBuffers = nullptr;
+static ResizeBuffers1_t oResizeBuffers1 = nullptr;
 
-static HRESULT WINAPI hkResizeBuffers(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags) {
-    if (G::Rtv) { G::Ctx->OMSetRenderTargets(0, nullptr, nullptr); G::Rtv.Reset(); }
-    HRESULT hr = reinterpret_cast<decltype(&hkResizeBuffers)>(G::OrigResize)(sc, n, w, h, f, flags);
-    if (SUCCEEDED(hr)) RebuildRtv(sc);
-    return hr;
-}
+static ID3D11Device* g_device = nullptr;
+static ID3D11DeviceContext* g_context = nullptr;
+static IDXGISwapChain* g_swap = nullptr;
+static ID3D11RenderTargetView* g_rtv = nullptr;
+static bool                    g_imguiReady = false;
+static bool                    g_hooked = false;
 
-static HRESULT WINAPI hkResizeBuffers1(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags,
-    const UINT* node, const IUnknown* const* dev) {
-    if (G::Rtv) { G::Ctx->OMSetRenderTargets(0, nullptr, nullptr); G::Rtv.Reset(); }
-    HRESULT hr = reinterpret_cast<decltype(&hkResizeBuffers1)>(G::OrigResize1)(sc, n, w, h, f, flags, node, dev);
-    if (SUCCEEDED(hr)) RebuildRtv(sc);
-    return hr;
-}
-
-static void Setup(IDXGISwapChain* sc) {
-    if (G::Ready) return;
-    G::Log("setup: swapchain %p", static_cast<void*>(sc));
-    if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(G::Device.GetAddressOf())))) {
-        G::Log("setup: GetDevice selhal"); G::Device.Reset(); return;
+static void CreateRTV()
+{
+    if (!g_swap || !g_device || g_rtv) return;
+    ID3D11Texture2D* back = nullptr;
+    if (SUCCEEDED(g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back)) && back)
+    {
+        g_device->CreateRenderTargetView(back, nullptr, &g_rtv);
+        back->Release();
     }
-    G::Device->GetImmediateContext(G::Ctx.GetAddressOf());
+}
 
-    DXGI_SWAP_CHAIN_DESC desc{};
-    sc->GetDesc(&desc);
-    if (desc.OutputWindow) G::Window = desc.OutputWindow;
-    if (!G::Window) G::Window = FindWindowW(L"SDL_app", nullptr);
-    if (!G::Window) { G::Device.Reset(); G::Ctx.Reset(); return; }
+static void ReleaseRTV()
+{
+    if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; }
+}
 
-    RebuildRtv(sc);
-    if (!G::Rtv) { G::Device.Reset(); G::Ctx.Reset(); return; }
+static void Setup(IDXGISwapChain* sc)
+{
+    if (g_imguiReady) return;
+    inp::Log("setup: start");
 
-    IMGUI_CHECKVERSION();
+    g_swap = sc;
+    if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&g_device)) || !g_device)
+    {
+        inp::Log("setup: GetDevice FAIL");
+        return;
+    }
+    g_device->GetImmediateContext(&g_context);
+    CreateRTV();
+
+    inp::Init(sc);
+    inp::g_gui = &G::Ui;
+
+    if (!inp::GameHwnd())
+    {
+        inp::Log("setup: hwnd chybi, zkusim priste");
+        ReleaseRTV();
+        if (g_context) { g_context->Release(); g_context = nullptr; }
+        if (g_device) { g_device->Release();  g_device = nullptr; }
+        return;
+    }
+
     ImGui::CreateContext();
-    ImGui::GetIO().IniFilename = nullptr;
-    ImGui_ImplWin32_Init(G::Window);
-    ImGui_ImplDX11_Init(G::Device.Get(), G::Ctx.Get());
-    G::Ready = true;
-    G::Log("setup: ready");
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    ImGui_ImplWin32_Init(inp::GameHwnd());
+    ImGui_ImplDX11_Init(g_device, g_context);
+
+    g_imguiReady = true;
+    inp::Log("setup: hotovo");
 }
 
-static void Render() {
-    if (G::Visible) {
-        if (!G::Cursor) { while (ShowCursor(TRUE) < 0) {} G::Cursor = true; }
-        ClipCursor(nullptr);
-    } else if (G::Cursor) {
-        while (ShowCursor(FALSE) >= 0) {}
-        G::Cursor = false;
-    }
+static void Render()
+{
+    if (!g_imguiReady) return;
+
+    inp::Tick();
+    inp::Feed();
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    RefreshPlayers();
     DrawESP();
     RunAim();
     RunTrigger();
     RunMisc();
 
-    if (G::Visible) G::Ui.draw();
+    G::Ui.setVisible(inp::MenuOpen());
+    if (inp::MenuOpen())
+        G::Ui.draw();
 
     ImGui::Render();
 
-    ComPtr<ID3D11RenderTargetView> prev;
-    G::Ctx->OMGetRenderTargets(1, prev.GetAddressOf(), nullptr);
-    G::Ctx->OMSetRenderTargets(1, G::Rtv.GetAddressOf(), nullptr);
+    ID3D11RenderTargetView* prev = nullptr;
+    g_context->OMGetRenderTargets(1, &prev, nullptr);
+    g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    if (prev) G::Ctx->OMSetRenderTargets(1, prev.GetAddressOf(), nullptr);
-    else G::Ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    g_context->OMSetRenderTargets(1, &prev, nullptr);
+    if (prev) prev->Release();
 }
 
-static HRESULT WINAPI hkPresent(IDXGISwapChain* sc, UINT sync, UINT flags) {
-    if (!G::Ready) Setup(sc);
-    if (G::Ready && G::Rtv) Render();
-    HRESULT hr = reinterpret_cast<decltype(&hkPresent)>(G::OrigPresent)(sc, sync, flags);
-    if (G::Unload) Unload();
+static HRESULT WINAPI hkPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+{
+    __try
+    {
+        if (!g_imguiReady) Setup(sc);
+        if (g_imguiReady) Render();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { inp::Log("present: SEH"); }
+
+    return oPresent(sc, sync, flags);
+}
+
+static HRESULT WINAPI hkPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* pp)
+{
+    __try
+    {
+        if (!g_imguiReady) Setup((IDXGISwapChain*)sc);
+        if (g_imguiReady) Render();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { inp::Log("present1: SEH"); }
+
+    return oPresent1(sc, sync, flags, pp);
+}
+
+static HRESULT WINAPI hkResizeBuffers(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl)
+{
+    ReleaseRTV();
+    HRESULT hr = oResizeBuffers(sc, n, w, h, f, fl);
+    if (g_imguiReady) CreateRTV();
     return hr;
 }
 
-static HRESULT WINAPI hkPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* p) {
-    if (!G::Ready) Setup(sc);
-    if (G::Ready && G::Rtv) Render();
-    HRESULT hr = reinterpret_cast<decltype(&hkPresent1)>(G::OrigPresent1)(sc, sync, flags, p);
-    if (G::Unload) Unload();
+static HRESULT WINAPI hkResizeBuffers1(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl,
+    const UINT* nodeMask, const IUnknown* const* presentQueue)
+{
+    ReleaseRTV();
+    HRESULT hr = oResizeBuffers1(sc, n, w, h, f, fl, nodeMask, presentQueue);
+    if (g_imguiReady) CreateRTV();
     return hr;
 }
 
-static LRESULT CALLBACK HookProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
-    if (!G::OrigWndProc) return DefWindowProcW(h, msg, w, l);
+static void RemoveHooks()
+{
+    if (!g_hooked || !oPresent || !g_swap) return;
 
-    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
-        if (w == VK_INSERT && !(l & (1LL << 30))) {
-            G::Visible = !G::Visible;
-            G::Ui.setVisible(G::Visible);
-            G::Log("insert -> %d", G::Visible ? 1 : 0);
-            if (!G::Visible) ClipCursor(nullptr);
-            return 0;
-        }
-        if (w == VK_END && !(l & (1LL << 30))) { G::Unload = true; return 0; }
-        if (w == VK_F5 && !(l & (1LL << 30))) { SaveConfig(); return 0; }
-        if (w == VK_F9 && !(l & (1LL << 30))) { LoadConfig(); return 0; }
+    void** vt = *(void***)g_swap;
+    if (vt)
+    {
+        DWORD old{};
+        VirtualProtect(vt, 0x100 * sizeof(void*), PAGE_EXECUTE_READWRITE, &old);
+        vt[8] = oPresent;
+        vt[13] = oResizeBuffers;
+        vt[22] = oPresent1;
+        if (oResizeBuffers1) vt[39] = oResizeBuffers1;
+        VirtualProtect(vt, 0x100 * sizeof(void*), old, &old);
     }
-
-    if (G::Ready) {
-        if (getrekt::Win32Input(G::Ui, msg, w, l)) return 0;
-        if (ImGui_ImplWin32_WndProcHandler(h, msg, w, l)) return 0;
-    }
-
-    if (G::Visible) {
-        switch (msg) {
-        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP:
-        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_MBUTTONDOWN: case WM_MBUTTONUP:
-        case WM_MOUSEWHEEL: case WM_XBUTTONDOWN: case WM_XBUTTONUP:
-        case WM_INPUT: case WM_KEYDOWN: case WM_KEYUP: case WM_CHAR:
-            return 0;
-        default: break;
-        }
-    }
-    return CallWindowProcW(G::OrigWndProc, h, msg, w, l);
+    g_hooked = false;
 }
 
-void InitializeHooks() {
-    G::Log("hooks: start");
-    for (int i = 0; i < 300 && !G::Window; ++i) {
-        G::Window = FindWindowW(L"SDL_app", nullptr);
-        if (!G::Window) Sleep(200);
+static void Shutdown()
+{
+    if (g_imguiReady)
+    {
+        ImGui_ImplDX11_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        g_imguiReady = false;
     }
-    G::Log("hooks: hwnd %p", static_cast<void*>(G::Window));
+    inp::g_gui = nullptr;
+    ReleaseRTV();
+    if (g_context) { g_context->Release(); g_context = nullptr; }
+    if (g_device) { g_device->Release();  g_device = nullptr; }
+}
 
-    if (G::Window) {
-        WNDPROC current = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(G::Window, GWLP_WNDPROC));
-        if (current == HookProc) { G::Log("hooks: uz nas"); return; }
-        G::OrigWndProc = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrW(G::Window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookProc)));
-        G::Log("hooks: wndproc %p", reinterpret_cast<void*>(G::OrigWndProc));
-    }
+void InitializeHooks()
+{
+    if (g_hooked) return;
 
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.lpfnWndProc = DefWindowProcW;
-    wc.hInstance = G::Module;
-    wc.lpszClassName = L"Cs2EspDummy";
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"cs2esp_dummy";
     RegisterClassExW(&wc);
-    HWND dummy = CreateWindowExW(0, wc.lpszClassName, L"d", WS_OVERLAPPEDWINDOW,
-        0, 0, 100, 100, nullptr, nullptr, G::Module, nullptr);
+
+    HWND dummy = CreateWindowExW(0, wc.lpszClassName, L"x", WS_OVERLAPPEDWINDOW,
+        0, 0, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!dummy) { inp::Log("hooks: dummy okno FAIL"); return; }
 
     DXGI_SWAP_CHAIN_DESC sd{};
     sd.BufferCount = 1;
@@ -184,36 +216,45 @@ void InitializeHooks() {
     sd.Windowed = TRUE;
     sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-    ComPtr<ID3D11Device> dev;
-    ComPtr<ID3D11DeviceContext> ctx;
-    ComPtr<IDXGISwapChain> sc;
+    IDXGISwapChain* sc = nullptr;
+    ID3D11Device* dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
     D3D_FEATURE_LEVEL fl{};
 
     HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
         D3D11_SDK_VERSION, &sd, &sc, &dev, &fl, &ctx);
-    G::Log("hooks: dummy hr=0x%08lX", static_cast<unsigned long>(hr));
-    if (FAILED(hr)) return;
 
-    void** vtbl = *reinterpret_cast<void***>(sc.Get());
-    DWORD old = 0;
-    VirtualProtect(vtbl, 48 * sizeof(void*), PAGE_EXECUTE_READWRITE, &old);
-    G::OrigPresent = vtbl[8];
-    G::OrigResize = vtbl[13];
-    G::OrigPresent1 = vtbl[22];
-    G::OrigResize1 = vtbl[39];
-    vtbl[8] = &hkPresent;
-    vtbl[13] = &hkResizeBuffers;
-    if (G::OrigPresent1) vtbl[22] = &hkPresent1;
-    if (G::OrigResize1) vtbl[39] = &hkResizeBuffers1;
-    VirtualProtect(vtbl, 48 * sizeof(void*), old, &old);
-    G::Log("hooks: hotovo");
+    if (FAILED(hr) || !sc)
+    {
+        inp::Logf("hooks: dummy swapchain FAIL 0x%08lX", (unsigned long)hr);
+        DestroyWindow(dummy);
+        return;
+    }
 
-    sc.Reset(); dev.Reset(); ctx.Reset();
+    void** vt = *(void***)sc;
+    oPresent = (Present_t)vt[8];
+    oResizeBuffers = (ResizeBuffers_t)vt[13];
+    oPresent1 = (Present1_t)vt[22];
+    oResizeBuffers1 = (ResizeBuffers1_t)vt[39];
+
+    DWORD old{};
+    VirtualProtect(vt, 0x100 * sizeof(void*), PAGE_EXECUTE_READWRITE, &old);
+    vt[8] = &hkPresent;
+    vt[13] = &hkResizeBuffers;
+    if (oPresent1) vt[22] = &hkPresent1;
+    if (oResizeBuffers1) vt[39] = &hkResizeBuffers1;
+    VirtualProtect(vt, 0x100 * sizeof(void*), old, &old);
+
+    g_hooked = true;
+    inp::Log("hooks: vtable OK");
+
+    sc->Release();
+    dev->Release();
+    ctx->Release();
     DestroyWindow(dummy);
-    UnregisterClassW(wc.lpszClassName, G::Module);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
+    inp::SetUnloadCallback([] { RemoveHooks(); Shutdown(); });
 }
 
-void CleanupHooks() {
-    if (G::OrigWndProc && G::Window)
-        SetWindowLongPtrW(G::Window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(G::OrigWndProc));
-}
+void RemoveHooksPublic() { RemoveHooks(); }

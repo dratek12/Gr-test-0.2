@@ -20,7 +20,7 @@ namespace getrekt {
         } cs2;
         int normalWeapon = 0;
         float normalScrollRequest = -1;
-        std::array<float, 6> normalFov{ 1,1,1,1,1,1 };
+        std::array<float, 6> normalFov{ 8,8,8,8,8,8 };
         bool weaponWindow = false, clubWindow = false, spectators = false;
         Theme colors;
         std::unordered_map<std::string, bool> checks;
@@ -222,32 +222,82 @@ namespace getrekt {
             ImGui::PushID(normalWeapon);
             Panel("normal-aim", 30, 206, 300, 174);
             if (normalScrollRequest >= 0) { ImGui::SetScrollY(normalScrollRequest);normalScrollRequest = -1; }
-            Section("Aimbot:");Checks({ "Aimbot  [key not set]","Always on","Friendlyfire","Silent aim","Jump check" });
+            Section("Aimbot:");
+            BoundCheck("Aimbot  [key not set]", cs2.aim);
+            Checks({ "Always on","Friendlyfire","Silent aim","Jump check" });
             Section("Custom settings:");
-            numbers[Id("FOV")] = normalFov[normalWeapon];Slider("FOV", 1, 0, 30, "%.2f");normalFov[normalWeapon] = numbers[Id("FOV")];
+            numbers[Id("FOV")] = normalFov[normalWeapon];Slider("FOV", 8, 0, 30, "%.2f");normalFov[normalWeapon] = numbers[Id("FOV")];
             Slider("Speed", 1, 0, 30, "%.2f");Slider("Speed - shooting", 1, 0, 30, "%.2f");
             Combo("Bone", "Auto\0Head\0Chest\0Stomach\0");
             Section("Non sticky aim:");Slider("Lock for X ms", 50, 0, 1000);Slider("Release after X ms", 100, 0, 1000);Slider("Reaction time (ms)", 25, 0, 500);
+
+            cs2.aimKey = keybinds[Id("Aimbot  [key not set]")];
+            cs2.fov = numbers[Id("FOV")];
+            cs2.smooth = numbers[Id("Speed")];
+            {
+                int b = choices[Id("Bone")];
+                cs2.bone = (b == 1) ? 0 : (b == 2 || b == 3) ? 1 : 2;
+            }
             EndPanel();
             Panel("normal-rcs", 30, 392, 300, 98);
             Section("RCS:");Checks({ "RCS","RCS enabled always" });
             Slider("X min", 1, 0, 100, "%.2f");Slider("X max", 1, 0, 100, "%.2f");Slider("Y min", 1, 0, 100, "%.2f");Slider("Y max", 1, 0, 100, "%.2f");EndPanel();
             Panel("normal-trigger", 363, 206, 297, 284);
-            Section("Triggerbot:");Checks({ "Triggerbot","On key  [key not set]","Friendlyfire","Head","Chest","Stomach","Arms","Legs","Hit chance" });
-            Slider("Hit chance", 1, 0, 100, "%.2f");Check("Delay");Slider("Delay", 250, 0, 1000);Slider("Min. damage", 30, 0, 100, "%.2f");Check("Backtrack");
+            Section("Triggerbot:");
+            BoundCheck("Triggerbot##legit", cs2.trigger);
+            Check("On key  [key not set]");
+            Checks({ "Friendlyfire","Head","Chest","Stomach","Arms","Legs","Hit chance" });
+            Slider("Hit chance", 100, 0, 100, "%.2f");
+            Check("Delay");Slider("Delay", 250, 0, 1000);Slider("Min. damage", 30, 0, 100, "%.2f");Check("Backtrack");
+            cs2.triggerKey = keybinds[Id("On key  [key not set]")];
+            cs2.hitchance = numbers[Id("Hit chance")];
             EndPanel();ImGui::PopID();
         }
         void Legit() {
             ImGui::SetCursorPos(ImVec2(30, 120));Tabs("legit", { "Normal","Advanced" }, legit, 630);
             if (!legit) { NormalLegit();return; }
             Panel("legit-left", 30, 164, 300, 326);Tabs("legit-left-tabs", { "Global","Triggerbot","KnifeBot" }, legitLeft, 260);
-            Section(legitLeft == 0 ? "Global settings:" : legitLeft == 1 ? "Triggerbot:" : "KnifeBot:");Check("Enable", legitLeft == 0);
-            if (legitLeft == 0) { Checks({ "Aim at teammates","Auto fire","Aim on shot","Flash check","Jump check","Smoke check","Jump Enemy Check" });ImGui::Separator();Check("Draw Fov", true);Checks({ "Show Target","Draw Silent Fov" });Check("Wall check", true);Check("Scope check", true);Checks({ "Auto pistol","Fast zoom","FaceIt","Entity aim" }); }
-            else if (legitLeft == 1) { Check("On key [key not set]");Slider("Delay", 100, 0, 500);Slider("Hitchance", 50, 0, 100);Check("Scope check");Combo("HitBox", "Head\0Chest\0All\0"); }
+            Section(legitLeft == 0 ? "Global settings:" : legitLeft == 1 ? "Triggerbot:" : "KnifeBot:");
+            BoundCheck("Enable [key not set]##legit", cs2.aim);
+            if (legitLeft == 0) {
+                Check("Aim at teammates");
+                BoundCheck("Auto fire##legit", cs2.autoFire);
+                Checks({ "Aim on shot","Flash check","Jump check","Smoke check","Jump Enemy Check" });
+                ImGui::Separator();
+                BoundCheck("Draw Fov##legit", cs2.fovCircle);
+                Checks({ "Show Target","Draw Silent Fov" });
+                Check("Wall check", true);Check("Scope check", true);
+                Checks({ "Auto pistol","Fast zoom","FaceIt","Entity aim" });
+            }
+            else if (legitLeft == 1) {
+                Check("On key [key not set]##legit2");
+                Slider("Delay", 100, 0, 500);
+                Slider("Hitchance", 100, 0, 100);
+                Check("Scope check");
+                Combo("HitBox##trig", "Head\0Chest\0All\0");
+                cs2.triggerKey = keybinds[Id("On key [key not set]##legit2")];
+                cs2.hitchance = numbers[Id("Hitchance")];
+                {
+                    int b = choices[Id("HitBox##trig")];
+                    cs2.bone = (b == 1) ? 1 : (b == 2) ? 2 : 0;
+                }
+            }
             else { Check("Team check");Slider("Distance", 60, 0, 100); }
+            cs2.aimKey = keybinds[Id("Enable [key not set]##legit")];
             EndPanel();
             Panel("legit-right", 363, 164, 297, 326);Tabs("legit-right-tabs", { "Basic","Rcs","pSilent","Delays" }, legitRight, 257);
-            if (legitRight == 0) { Section("Aim settings:");Slider("Fov", 5, 0, 30, "%.2f");Slider("Smooth", 5, 1, 30, "%.2f");Check("Nearest");Combo("HitBox", "Head\0Chest\0Nearest\0"); }
+            if (legitRight == 0) {
+                Section("Aim settings:");
+                Slider("Fov##legit", 8, 0, 30, "%.2f");
+                Slider("Smooth##legit", 3, 1, 30, "%.2f");
+                Check("Nearest");
+                Combo("HitBox##legit", "Head\0Chest\0Nearest\0");
+                Slider("Hit chance##legit", 100, 0, 100);
+                cs2.fov = numbers[Id("Fov##legit")];
+                cs2.smooth = numbers[Id("Smooth##legit")];
+                cs2.hitchance = numbers[Id("Hit chance##legit")];
+                cs2.bone = choices[Id("HitBox##legit")];
+            }
             else if (legitRight == 1) { Check("Enable");Slider("X", 100, 0, 100);Slider("Y", 100, 0, 100);Slider("Start bullet", 1, 0, 10); }
             else if (legitRight == 2) { ImGui::Dummy(ImVec2(0, 12));Check("Silent");Slider("%chance", 100, 0, 100);Slider("Fov", 20, 0, 30, "%.2f");Check("Nearest");Combo("HitBox", "Head\0Chest\0Pelvis\0");Slider("Start bullet", 0, 0, 10);Slider("End bullet", 1, 0, 10); }
             else { Section("Delays:");Slider("First shot", 100, 0, 500);Slider("Target switch", 100, 0, 500); }

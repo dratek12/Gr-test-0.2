@@ -6,10 +6,10 @@ inline Vec3 operator-(const Vec3& a, const Vec3& b) { return { a.x - b.x, a.y - 
 
 namespace Off {
     enum : uintptr_t {
-        EntityList = 0x271EBA8, LocalPlayer = 0x2569948, ViewMatrix = 0x256F250,
-        ViewAngles = 0x2580098, Sensitivity = 0x2566C48,
+        EntityList = 0x271FBB8, LocalPlayer = 0x2569A48, ViewMatrix = 0x2570250,
+        ViewAngles = 0x2581098, Sensitivity = 0x2567C48,
         Health = 0x34C, LifeState = 0x354, Team = 0x3E7,
-        GameSceneNode = 0x330, Dormant = 0x103,
+        GameSceneNode = 0x330, Dormant = 0x103, AbsOrigin = 0xC8,
         WeaponServices = 0x12F0, ActiveWeapon = 0x60, Clip1 = 0x1928,
         AimPunch = 0x1598, PunchAngle = 0x50, SensitivityVal = 0x58
     };
