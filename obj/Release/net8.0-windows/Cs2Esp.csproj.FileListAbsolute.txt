@@ -1,0 +1,14 @@
+C:\cs2esp\obj\Release\net8.0-windows\Cs2Esp.GeneratedMSBuildEditorConfig.editorconfig
+C:\cs2esp\obj\Release\net8.0-windows\Cs2Esp.AssemblyInfoInputs.cache
+C:\cs2esp\obj\Release\net8.0-windows\Cs2Esp.AssemblyInfo.cs
+C:\cs2esp\obj\Release\net8.0-windows\Cs2Esp.csproj.CoreCompileInputs.cache
+C:\cs2esp\bin\Release\net8.0-windows\Cs2Esp.exe
+C:\cs2esp\bin\Release\net8.0-windows\Cs2Esp.deps.json
+C:\cs2esp\bin\Release\net8.0-windows\Cs2Esp.runtimeconfig.json
+C:\cs2esp\bin\Release\net8.0-windows\Cs2Esp.dll
+C:\cs2esp\bin\Release\net8.0-windows\Cs2Esp.pdb
+C:\cs2esp\obj\Release\net8.0-windows\Cs2Esp.dll
+C:\cs2esp\obj\Release\net8.0-windows\refint\Cs2Esp.dll
+C:\cs2esp\obj\Release\net8.0-windows\Cs2Esp.pdb
+C:\cs2esp\obj\Release\net8.0-windows\Cs2Esp.genruntimeconfig.cache
+C:\cs2esp\obj\Release\net8.0-windows\ref\Cs2Esp.dll

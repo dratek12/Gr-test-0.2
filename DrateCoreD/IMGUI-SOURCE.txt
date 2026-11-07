@@ -1,0 +1,4 @@
+Source: https://github.com/ocornut/imgui/archive/refs/tags/v1.93.0.zip
+Version: 1.93.0
+Archive SHA256: e21907fd8dd5ea59aa00538632a02ad0a3ededb4ddc533b94702331fbcd6c470
+Bundled core and backend source files are unmodified.

@@ -1,0 +1,9 @@
+Dear ImGui: official v1.93.0 (IMGUI_VERSION_NUM 19300)
+MSVC x64 Release + Debug builds: PASS
+Debug assertions-enabled UI smoke: PASS
+Release CTest: 2/2 PASS (UI + DX11/WARP)
+Mouse click binding capture, Mouse 4, Escape and checkbox independence: PASS
+External CMake consumer with its own ImGui target, bundled core OFF: PASS
+11 DX11 captures (44 frames): exit 0, QA PNGs included
+Renderer-independent core: no Windows dependency
+Non-Windows backend and different ImGui versions: not tested
